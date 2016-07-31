@@ -52,9 +52,11 @@ class InvalidRPCMethod(Error):
 # All method calls on the remote repository object must be whitelisted in RepositoryServer.rpc_methods and have api
 # stubs in RemoteRepository. The @api decorator on these stubs is used to set server version requirements.
 #
-# Method parameters are identfied only by name and never by position. If not overriden by a version requirement,
-# unknown parameters are ignored by the server side. When parameters are removed, they need to be preserved
-# as defaulted parameters either on the client stubs so that older servers still get the from them still needed parameters.
+# Method parameters are identfied only by name and never by position. Unknown parameters are ignored by the server side.
+# If a new parameter is important and may not be ignored, on the client a parameter specific version requirement needs
+# to be added.
+# When parameters are removed, they need to be preserved  as defaulted parameters on the client stubs so that older
+# servers still get the from them still needed parameters.
 
 
 compatMap = {
@@ -228,6 +230,13 @@ def api(*, since, **kwargs):
 
             if self.server_version < since:
                 raise self.RPCError("Server too old. Need at least: " + ".".join([str(c) for c in since]))
+
+            for name, restriction in kwargs.items():
+                if 'previously' in restriction and named[name] == restriction['previously']:
+                    continue
+
+                raise self.RPCError("Server too old. Need at least: " + ".".join([str(c) for c in restriction['since']]))
+
             return self.call(f.__name__, named)
         return do_rpc
     return decorator
