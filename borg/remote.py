@@ -141,7 +141,7 @@ class RemoteRepository:
         self.preload_ids = []
         self.msgid = 0
         self.to_send = b''
-        self.cache = {}
+        self.get_cache = {}
         self.ignore_responses = set()
         self.responses = {}
         self.unpacker = msgpack.Unpacker(use_list=False)
@@ -243,9 +243,9 @@ class RemoteRepository:
             return
 
         def fetch_from_cache(args):
-            msgid = self.cache[args].pop(0)
-            if not self.cache[args]:
-                del self.cache[args]
+            msgid = self.get_cache[args].pop(0)
+            if not self.get_cache[args]:
+                del self.get_cache[args]
             return msgid
 
         def handle_error(error, res):
@@ -317,8 +317,8 @@ class RemoteRepository:
                 while not self.to_send and (calls or self.preload_ids) and len(waiting_for) < 100:
                     if calls:
                         args = calls.pop(0)
-                        if cmd == 'get' and args in self.cache:
-                            waiting_for.append(fetch_from_cache(args))
+                        if cmd == 'get' and args[0] in self.get_cache:
+                            waiting_for.append(fetch_from_cache(args[0]))
                         else:
                             self.msgid += 1
                             waiting_for.append(self.msgid)
@@ -326,7 +326,7 @@ class RemoteRepository:
                     if not self.to_send and self.preload_ids:
                         args = (self.preload_ids.pop(0),)
                         self.msgid += 1
-                        self.cache.setdefault(args, []).append(self.msgid)
+                        self.get_cache.setdefault(args[0], []).append(self.msgid)
                         self.to_send = msgpack.packb((1, self.msgid, 'get', args))
 
                 if self.to_send:
