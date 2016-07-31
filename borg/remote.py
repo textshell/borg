@@ -238,7 +238,7 @@ class RemoteRepository:
         for resp in self.call_many(cmd, [args], **kw):
             return resp
 
-    def call_many(self, cmd, calls, wait=True, is_preloaded=False):
+    def call_many(self, cmd, calls, wait=True):
         if not calls:
             return
 
@@ -316,22 +316,18 @@ class RemoteRepository:
             if w:
                 while not self.to_send and (calls or self.preload_ids) and len(waiting_for) < 100:
                     if calls:
-                        if is_preloaded:
-                            if calls[0] in self.cache:
-                                waiting_for.append(fetch_from_cache(calls.pop(0)))
+                        args = calls.pop(0)
+                        if cmd == 'get' and args in self.cache:
+                            waiting_for.append(fetch_from_cache(args))
                         else:
-                            args = calls.pop(0)
-                            if cmd == 'get' and args in self.cache:
-                                waiting_for.append(fetch_from_cache(args))
-                            else:
-                                self.msgid += 1
-                                waiting_for.append(self.msgid)
-                                self.to_send = msgpack.packb((1, self.msgid, cmd, args))
+                            self.msgid += 1
+                            waiting_for.append(self.msgid)
+                            self.to_send = msgpack.packb((1, self.msgid, cmd, args))
                     if not self.to_send and self.preload_ids:
                         args = (self.preload_ids.pop(0),)
                         self.msgid += 1
                         self.cache.setdefault(args, []).append(self.msgid)
-                        self.to_send = msgpack.packb((1, self.msgid, cmd, args))
+                        self.to_send = msgpack.packb((1, self.msgid, 'get', args))
 
                 if self.to_send:
                     try:
@@ -367,8 +363,8 @@ class RemoteRepository:
         for resp in self.get_many([id_]):
             return resp
 
-    def get_many(self, ids, is_preloaded=False):
-        for resp in self.call_many('get', [(id_,) for id_ in ids], is_preloaded=is_preloaded):
+    def get_many(self, ids):
+        for resp in self.call_many('get', [(id_,) for id_ in ids]):
             yield resp
 
     def put(self, id_, data, wait=True):

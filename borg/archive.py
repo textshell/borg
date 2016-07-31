@@ -112,8 +112,8 @@ class DownloadPipeline:
             for item in items:
                 yield item
 
-    def fetch_many(self, ids, is_preloaded=False):
-        for id_, data in zip(ids, self.repository.get_many(ids, is_preloaded=is_preloaded)):
+    def fetch_many(self, ids):
+        for id_, data in zip(ids, self.repository.get_many(ids)):
             yield self.key.decrypt(id_, data)
 
 
@@ -348,7 +348,7 @@ Number of files: {0.stats.nfiles}'''.format(
 
         if dry_run or stdout:
             if b'chunks' in item:
-                for data in self.pipeline.fetch_many([c[0] for c in item[b'chunks']], is_preloaded=True):
+                for data in self.pipeline.fetch_many([c[0] for c in item[b'chunks']]):
                     if stdout:
                         sys.stdout.buffer.write(data)
                 if stdout:
@@ -390,7 +390,7 @@ Number of files: {0.stats.nfiles}'''.format(
                     fd = open(path, 'wb')
                 with fd:
                     ids = [c[0] for c in item[b'chunks']]
-                    for data in self.pipeline.fetch_many(ids, is_preloaded=True):
+                    for data in self.pipeline.fetch_many(ids):
                         with backup_io():
                             if sparse and self.zeros.startswith(data):
                                 # all-zero chunk: create a hole in a sparse file
