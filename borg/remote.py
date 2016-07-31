@@ -1,5 +1,6 @@
 import errno
 import fcntl
+import inspect, functools
 import logging
 import os
 import select
@@ -16,6 +17,7 @@ from .repository import Repository
 import msgpack
 
 RPC_PROTOCOL_VERSION = 2
+BORG_VERSION = (1, 0, 7)
 
 BUFSIZE = 10 * 1024 * 1024
 
@@ -35,6 +37,49 @@ class PathNotAllowed(Error):
 class InvalidRPCMethod(Error):
     """RPC method {} is not valid"""
 
+
+# Protocol compatibility:
+# In general the server is responsible for rejecting too old clients and the client it responsible for rejecting
+# too old servers. This ensures that the knowleadge what is compatible is always held by the newer component.
+#
+# The server can do checks for the client version in RepositoryServer.negotiate. If the client_data is 2 then then
+# client is in the version range [0.29.0, 1.0.6] inclusiv. For newer clients client_data is a dict which contains
+# client_version.
+#
+# For the client the return of the negotiate method is either 2 if the server is in the version range [0.29.0, 1.0.6]
+# inclusiv, or it is a dict which includes the server version.
+#
+# All method calls on the remote repository object must be whitelisted in RepositoryServer.rpc_methods and have api
+# stubs in RemoteRepository. The @api decorator on these stubs is used to set server version requirements.
+#
+# Method parameters are identfied only by name and never by position. If not overriden by a version requirement,
+# unknown parameters are ignored by the server side. When parameters are removed, they need to be preserved
+# as defaulted parameters either on the client stubs so that older servers still get the from them still needed parameters.
+
+
+compatMap = {
+    'check' : ['repair', 'save_space'],
+    'commit': ["save_space"],
+    'rollback': [],
+    'destroy': [],
+    '__len__': [],
+    'list': ["limit", "marker"],
+    'put': ["id_", "data"],
+    'get': ["id_"],
+    'delete': ["id_"],
+    'save_key': ["keydata"],
+    'load_key': [],
+    'break_lock': [],
+    'negotiate': ['client_data'],
+    'open': ['path', 'create', 'lock_wait', 'lock']
+}
+
+
+def decodeKeys(d):
+    r = {}
+    for (k, v) in d.items():
+        r[k.decode("utf-8")] = v
+    return r
 
 class RepositoryServer:  # pragma: no cover
     rpc_methods = (
@@ -58,6 +103,22 @@ class RepositoryServer:  # pragma: no cover
         self.repository = None
         self.restrict_to_paths = restrict_to_paths
         self.append_only = append_only
+        self.client_version = (1, 0, 6)
+
+    def positionalToNamed(self, method, argv):
+        kwargs = {}
+        for (pos, name) in enumerate(compatMap[method]):
+            kwargs[name] = argv[pos]
+
+        return kwargs
+
+    def filterArgs(self, f, kwargs):
+        filtered = {}
+        known = set(inspect.signature(f).parameters)
+        for (name, value) in kwargs.items():
+            if name in known:
+                filtered[name] = value
+        return filtered
 
     def serve(self):
         stdin_fd = sys.stdin.fileno()
@@ -82,11 +143,19 @@ class RepositoryServer:  # pragma: no cover
                     return
                 unpacker.feed(data)
                 for unpacked in unpacker:
-                    if not (isinstance(unpacked, tuple) and len(unpacked) == 4):
+                    if isinstance(unpacked, dict):
+                        dictFormat = True
+                        msgid = unpacked[b"i"]
+                        method = unpacked[b"m"].decode('ascii')
+                        args = decodeKeys(unpacked[b"a"])
+                    elif isinstance(unpacked, tuple) and len(unpacked) == 4:
+                        dictFormat = False
+                        type, msgid, method, args = unpacked
+                        method = method.decode('ascii')
+                        args = self.positionalToNamed(method, args)
+                    else:
                         self.repository.close()
                         raise Exception("Unexpected RPC data format.")
-                    type, msgid, method, args = unpacked
-                    method = method.decode('ascii')
                     try:
                         if method not in self.rpc_methods:
                             raise InvalidRPCMethod(method)
@@ -94,7 +163,8 @@ class RepositoryServer:  # pragma: no cover
                             f = getattr(self, method)
                         except AttributeError:
                             f = getattr(self.repository, method)
-                        res = f(*args)
+                        args = self.filterArgs(f, args)
+                        res = f(**args)
                     except BaseException as e:
                         # These exceptions are reconstructed on the client end in RemoteRepository.call_many(),
                         # and will be handled just like locally raised exceptions. Suppress the remote traceback
@@ -103,18 +173,29 @@ class RepositoryServer:  # pragma: no cover
                             logging.exception('Borg %s: exception in RPC call:', __version__)
                             logging.error(sysinfo())
                         exc = "Remote Exception (see remote log for the traceback)"
-                        os.write(stdout_fd, msgpack.packb((1, msgid, e.__class__.__name__, exc)))
+                        if dictFormat:
+                            os.write(stdout_fd, msgpack.packb({b'i': msgid, b'exception_class': e.__class__.__name__, b'exception_args': e.args}))
+                        else:
+                            os.write(stdout_fd, msgpack.packb((1, msgid, e.__class__.__name__, exc)))
                     else:
-                        os.write(stdout_fd, msgpack.packb((1, msgid, None, res)))
+                        if dictFormat:
+                            os.write(stdout_fd, msgpack.packb({b'i': msgid, b'r': res}))
+                        else:
+                            os.write(stdout_fd, msgpack.packb((1, msgid, None, res)))
             if es:
                 self.repository.close()
                 return
 
-    def negotiate(self, versions):
-        return RPC_PROTOCOL_VERSION
+    def negotiate(self, client_data):
+        if client_data == RPC_PROTOCOL_VERSION:
+            return RPC_PROTOCOL_VERSION
+        elif isinstance(client_data, dict):
+            self.client_version = client_data[b"client_version"]
+            return { "server_version": BORG_VERSION }
 
     def open(self, path, create=False, lock_wait=None, lock=True):
-        path = os.fsdecode(path)
+        if isinstance(path, bytes):
+            path = os.fsdecode(path)
         if path.startswith('/~'):
             path = path[1:]
         path = os.path.realpath(os.path.expanduser(path))
@@ -127,6 +208,29 @@ class RepositoryServer:  # pragma: no cover
         self.repository = Repository(path, create, lock_wait=lock_wait, lock=lock, append_only=self.append_only)
         self.repository.__enter__()  # clean exit handled by serve() method
         return self.repository.id
+
+
+def api(*, since, **kwargs):
+    def decorator(f):
+        @functools.wraps(f)
+        def do_rpc(self, *args, **kwargs):
+            sig = inspect.signature(f)
+            bound_args = sig.bind(self, *args, **kwargs)
+            named = {}
+            for name, param in sig.parameters.items():
+                if name == 'self':
+                    continue
+                if name in bound_args.arguments:
+                    named[name] = bound_args.arguments[name]
+                else:
+                    if param.default is not param.empty:
+                        named[name] = param.default
+
+            if self.server_version < since:
+                raise self.RPCError("Server too old. Need at least: " + ".".join([str(c) for c in since]))
+            return self.call(f.__name__, named)
+        return do_rpc
+    return decorator
 
 
 class RemoteRepository:
@@ -145,6 +249,8 @@ class RemoteRepository:
         self.ignore_responses = set()
         self.responses = {}
         self.unpacker = msgpack.Unpacker(use_list=False)
+        self.dictFormat = False
+        self.server_version = (1, 0, 6)
         self.p = None
         testing = location.host == '__testsuite__'
         borg_cmd = self.borg_cmd(args, testing)
@@ -166,13 +272,18 @@ class RemoteRepository:
         self.x_fds = [self.stdin_fd, self.stdout_fd, self.stderr_fd]
 
         try:
-            version = self.call('negotiate', RPC_PROTOCOL_VERSION)
+            version = self.call('negotiate', { 'client_data': { b'client_version': BORG_VERSION } } )
         except ConnectionClosed:
             raise ConnectionClosedWithHint('Is borg working on the server?') from None
-        if version != RPC_PROTOCOL_VERSION:
-            raise Exception('Server insisted on using unsupported protocol version %d' % version)
+        if version == RPC_PROTOCOL_VERSION:
+            self.dictFormat = False
+        elif isinstance(version, dict) and b"server_version" in version:
+            self.dictFormat = True
+            self.server_version = version[b"server_version"]
+        else:
+            raise Exception('Server insisted on using unsupported protocol version %s' % version)
         try:
-            self.id = self.call('open', self.location.path, create, lock_wait, lock)
+            self.id = self.call('open', { 'path': self.location.path, 'create': create, 'lock_wait': lock_wait, 'lock': lock })
         except Exception:
             self.close()
             raise
@@ -234,7 +345,13 @@ class RemoteRepository:
             args.append('%s' % location.host)
         return args
 
-    def call(self, cmd, *args, **kw):
+    def namedToPositional(self, method, kwargs):
+        argv = []
+        for name in compatMap[method]:
+            argv.append(kwargs[name])
+        return argv
+
+    def call(self, cmd, args, **kw):
         for resp in self.call_many(cmd, [args], **kw):
             return resp
 
@@ -248,7 +365,7 @@ class RemoteRepository:
                 del self.get_cache[args]
             return msgid
 
-        def handle_error(error, res):
+        def handle_error(error, args):
             if error == b'DoesNotExist':
                 raise Repository.DoesNotExist(self.location.orig)
             elif error == b'AlreadyExists':
@@ -256,15 +373,18 @@ class RemoteRepository:
             elif error == b'CheckNeeded':
                 raise Repository.CheckNeeded(self.location.orig)
             elif error == b'IntegrityError':
-                raise IntegrityError(res)
+                raise IntegrityError(args)
             elif error == b'PathNotAllowed':
-                raise PathNotAllowed(*res)
+                raise PathNotAllowed(*args)
             elif error == b'ObjectNotFound':
-                raise Repository.ObjectNotFound(res[0], self.location.orig)
+                raise Repository.ObjectNotFound(args[0], self.location.orig)
             elif error == b'InvalidRPCMethod':
-                raise InvalidRPCMethod(*res)
+                raise InvalidRPCMethod(*args)
             else:
-                raise self.RPCError(res.decode('utf-8'))
+                if isinstance(args, bytes):
+                    raise self.RPCError(args.decode('utf-8'))
+                else:
+                    raise self.RPCError(args[0].decode('utf-8'))
 
         calls = list(calls)
         waiting_for = []
@@ -272,12 +392,12 @@ class RemoteRepository:
         while wait or calls:
             while waiting_for:
                 try:
-                    error, res = self.responses.pop(waiting_for[0])
+                    unpacked = self.responses.pop(waiting_for[0])
                     waiting_for.pop(0)
-                    if error:
-                        handle_error(error, res)
+                    if b'exception_class' in unpacked:
+                        handle_error(unpacked[b'exception_class'], unpacked[b'exception_args'])
                     else:
-                        yield res
+                        yield unpacked[b'r']
                         if not waiting_for and not calls:
                             return
                 except KeyError:
@@ -292,15 +412,22 @@ class RemoteRepository:
                         raise ConnectionClosed()
                     self.unpacker.feed(data)
                     for unpacked in self.unpacker:
-                        if not (isinstance(unpacked, tuple) and len(unpacked) == 4):
+                        if isinstance(unpacked, dict):
+                            msgid = unpacked[b'i']
+                        elif isinstance(unpacked, tuple) and len(unpacked) == 4:
+                            type, msgid, error, res = unpacked
+                            if error:
+                                unpacked = {b'i': msgid, b'exception_class': error, b'exception_args': res }  # res is totally wrong, but that is what the old code did
+                            else:
+                                unpacked = {b'i': msgid, b'r': res }
+                        else:
                             raise Exception("Unexpected RPC data format.")
-                        type, msgid, error, res = unpacked
                         if msgid in self.ignore_responses:
                             self.ignore_responses.remove(msgid)
-                            if error:
-                                handle_error(error, res)
+                            if b'exception_class' in unpacked:
+                                handle_error(unpacked[b'exception_class'], unpacked[b'exception_args'])
                         else:
-                            self.responses[msgid] = error, res
+                            self.responses[msgid] = unpacked
                 elif fd is self.stderr_fd:
                     data = os.read(fd, 32768)
                     if not data:
@@ -317,17 +444,23 @@ class RemoteRepository:
                 while not self.to_send and (calls or self.preload_ids) and len(waiting_for) < 100:
                     if calls:
                         args = calls.pop(0)
-                        if cmd == 'get' and args[0] in self.get_cache:
-                            waiting_for.append(fetch_from_cache(args[0]))
+                        if cmd == 'get' and args['id_'] in self.get_cache:
+                            waiting_for.append(fetch_from_cache(args['id_']))
                         else:
                             self.msgid += 1
                             waiting_for.append(self.msgid)
-                            self.to_send = msgpack.packb((1, self.msgid, cmd, args))
+                            if self.dictFormat:
+                                self.to_send = msgpack.packb({b'i': self.msgid, b'm': cmd, b'a': args})
+                            else:
+                                self.to_send = msgpack.packb((1, self.msgid, cmd, self.namedToPositional(cmd, args)))
                     if not self.to_send and self.preload_ids:
-                        args = (self.preload_ids.pop(0),)
+                        args = {'id_': self.preload_ids.pop(0)}
                         self.msgid += 1
-                        self.get_cache.setdefault(args[0], []).append(self.msgid)
-                        self.to_send = msgpack.packb((1, self.msgid, 'get', args))
+                        self.get_cache.setdefault(args['id_'], []).append(self.msgid)
+                        if self.dictFormat:
+                            self.to_send = msgpack.packb({b'i': self.msgid, b'm': 'get', b'a': args})
+                        else:
+                            self.to_send = msgpack.packb((1, self.msgid, 'get', self.namedToPositional(cmd, args)))
 
                 if self.to_send:
                     try:
@@ -341,46 +474,57 @@ class RemoteRepository:
                     w_fds = []
         self.ignore_responses |= set(waiting_for)
 
+    @api(since=(1, 0, 0))
     def check(self, repair=False, save_space=False):
-        return self.call('check', repair, save_space)
+        pass
 
+    @api(since=(1, 0, 0))
     def commit(self, save_space=False):
-        return self.call('commit', save_space)
+        pass
 
+    @api(since=(1, 0, 0))
     def rollback(self, *args):
-        return self.call('rollback')
+        pass
 
+    @api(since=(1, 0, 0))
     def destroy(self):
-        return self.call('destroy')
+        pass
 
+    @api(since=(1, 0, 0))
     def __len__(self):
-        return self.call('__len__')
+        pass
 
+    @api(since=(1, 0, 0))
     def list(self, limit=None, marker=None):
-        return self.call('list', limit, marker)
+        pass
 
     def get(self, id_):
         for resp in self.get_many([id_]):
             return resp
 
     def get_many(self, ids):
-        for resp in self.call_many('get', [(id_,) for id_ in ids]):
+        for resp in self.call_many('get', [{'id_': id_} for id_ in ids]):
             yield resp
 
+    @api(since=(1, 0, 0))
     def put(self, id_, data, wait=True):
-        return self.call('put', id_, data, wait=wait)
+        pass
 
+    @api(since=(1, 0, 0))
     def delete(self, id_, wait=True):
-        return self.call('delete', id_, wait=wait)
+        pass
 
+    @api(since=(1, 0, 0))
     def save_key(self, keydata):
-        return self.call('save_key', keydata)
+        pass
 
+    @api(since=(1, 0, 0))
     def load_key(self):
-        return self.call('load_key')
+        pass
 
+    @api(since=(1, 0, 0))
     def break_lock(self):
-        return self.call('break_lock')
+        pass
 
     def close(self):
         if self.p:

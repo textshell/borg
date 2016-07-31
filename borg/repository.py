@@ -466,33 +466,33 @@ class Repository:
         for id_ in ids:
             yield self.get(id_)
 
-    def put(self, id, data, wait=True):
+    def put(self, id_, data, wait=True):
         if not self._active_txn:
             self.prepare_txn(self.get_transaction_id())
         try:
-            segment, _ = self.index[id]
+            segment, _ = self.index[id_]
             self.segments[segment] -= 1
             self.compact.add(segment)
-            segment = self.io.write_delete(id)
+            segment = self.io.write_delete(id_)
             self.segments.setdefault(segment, 0)
             self.compact.add(segment)
         except KeyError:
             pass
-        segment, offset = self.io.write_put(id, data)
+        segment, offset = self.io.write_put(id_, data)
         self.segments.setdefault(segment, 0)
         self.segments[segment] += 1
-        self.index[id] = segment, offset
+        self.index[id_] = segment, offset
 
-    def delete(self, id, wait=True):
+    def delete(self, id_, wait=True):
         if not self._active_txn:
             self.prepare_txn(self.get_transaction_id())
         try:
-            segment, offset = self.index.pop(id)
+            segment, offset = self.index.pop(id_)
         except KeyError:
-            raise self.ObjectNotFound(id, self.path) from None
+            raise self.ObjectNotFound(id_, self.path) from None
         self.segments[segment] -= 1
         self.compact.add(segment)
-        segment = self.io.write_delete(id)
+        segment = self.io.write_delete(id_)
         self.compact.add(segment)
         self.segments.setdefault(segment, 0)
 
