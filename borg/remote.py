@@ -483,8 +483,9 @@ class RemoteRepository:
                     w_fds = []
         self.ignore_responses |= set(waiting_for)
 
-    @api(since=(1, 0, 0))
-    def open(self, path, create=False, lock_wait=None, lock=True):
+    @api(since=(1, 0, 0),
+         append_only={'since':(1.0.7), 'prevously':False})
+    def open(self, path, create=False, lock_wait=None, lock=True, append_only=False):
         pass
 
     @api(since=(1, 0, 0))
