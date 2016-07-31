@@ -292,7 +292,7 @@ class RemoteRepository:
         else:
             raise Exception('Server insisted on using unsupported protocol version %s' % version)
         try:
-            self.id = self.call('open', { 'path': self.location.path, 'create': create, 'lock_wait': lock_wait, 'lock': lock })
+            self.id = self.open(path=self.location.path, create=create, lock_wait=lock_wait, lock=lock)
         except Exception:
             self.close()
             raise
@@ -482,6 +482,10 @@ class RemoteRepository:
                 if not self.to_send and not (calls or self.preload_ids):
                     w_fds = []
         self.ignore_responses |= set(waiting_for)
+
+    @api(since=(1, 0, 0))
+    def open(self, path, create=False, lock_wait=None, lock=True):
+        pass
 
     @api(since=(1, 0, 0))
     def check(self, repair=False, save_space=False):
