@@ -158,7 +158,7 @@ class KeyManager:
                     print('the id line contains three \'/\', try again')
 
                 if sha256_truncated(data.lower().encode('ascii'), 2) != checksum:
-                    print('checksum did not match, try same line again')
+                    print('line checksum did not match, try same line again')
                     continue
 
                 try:
@@ -190,7 +190,7 @@ class KeyManager:
                     continue
 
                 if sha256_truncated(idx.to_bytes(2, byteorder='big') + part, 2) != checksum:
-                    print('checksum did not match, try line {0} again'.format(idx))
+                    print('line checksum did not match, try line {0} again'.format(idx))
                     continue
 
                 result += part
@@ -203,7 +203,7 @@ class KeyManager:
             return
 
         if sha256_truncated(result, 12) != id_complete_checksum:
-            print('The complete checksum did not match, aborting.')
+            print('The overall checksum did not match, aborting.')
             return
 
         self.keyblob = '\n'.join(textwrap.wrap(b2a_base64(result).decode('ascii'))) + '\n'
