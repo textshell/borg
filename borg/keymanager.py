@@ -1,11 +1,17 @@
+import argparse
 from binascii import hexlify, unhexlify, a2b_base64, b2a_base64
 import binascii
 import textwrap
 from hashlib import sha256
 
 from .key import KeyfileKey, RepoKey, PassphraseKey, KeyfileNotFoundError, PlaintextKey
-from .helpers import Manifest, NoManifestError, Error
+from .helpers import Manifest, NoManifestError, Error, EXIT_SUCCESS, EXIT_WARNING, EXIT_ERROR, location_validator
 from .repository import Repository
+from .archiver import with_repository
+from .logger import create_logger, setup_logging
+
+
+logger = create_logger()
 
 
 class UnencryptedRepo(Error):
@@ -209,3 +215,65 @@ class KeyManager:
         self.keyblob = '\n'.join(textwrap.wrap(b2a_base64(result).decode('ascii'))) + '\n'
 
         self.store_keyblob(args)
+
+
+class KeyParser:
+    @with_repository(lock=False, exclusive=False, manifest=False, cache=False)
+    def do_key_export(self, args, repository):
+        """Export the repository key for backup"""
+        manager = KeyManager(repository)
+        manager.load_keyblob()
+        if args.paper:
+            manager.export_paperkey(args.path)
+        else:
+            if not args.path:
+                logger.error("output file to export key to expected")
+                return EXIT_ERROR
+            manager.export(args.path)
+        return EXIT_SUCCESS
+
+    @with_repository(lock=False, exclusive=False, manifest=False, cache=False)
+    def do_key_import(self, args, repository):
+        """Export the repository key for backup"""
+        manager = KeyManager(repository)
+        if args.paper:
+            if args.path:
+                logger.error("with --paper import from file is not supported")
+                return EXIT_ERROR
+            manager.import_paperkey(args)
+        else:
+            if not args.path:
+                logger.error("input file to import key from expected")
+                return EXIT_ERROR
+            manager.import_keyfile(args)
+        return EXIT_SUCCESS
+
+
+    def build_subparser(self, key_parsers, common_parser):
+        subparser = key_parsers.add_parser('export', parents=[common_parser],
+                                        description=self.do_key_export.__doc__,
+                                        epilog="",
+                                        formatter_class=argparse.RawDescriptionHelpFormatter,
+                                        help='export repository key for backup')
+        subparser.set_defaults(func=self.do_key_export)
+        subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
+                            type=location_validator(archive=False))
+        subparser.add_argument('path', metavar='PATH', nargs='?', type=str,
+                            help='where to store the backup')
+        subparser.add_argument('--paper', dest='paper', action='store_true',
+                            default=False,
+                            help='Create an export suitable for printing and later type-in')
+
+        subparser = key_parsers.add_parser('import', parents=[common_parser],
+                                        description=self.do_key_import.__doc__,
+                                        epilog="",
+                                        formatter_class=argparse.RawDescriptionHelpFormatter,
+                                        help='import repository key from backup')
+        subparser.set_defaults(func=self.do_key_import)
+        subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
+                            type=location_validator(archive=False))
+        subparser.add_argument('path', metavar='PATH', nargs='?', type=str,
+                            help='path to the backup')
+        subparser.add_argument('--paper', dest='paper', action='store_true',
+                            default=False,
+                            help='interactively import from a backup done with --paper')

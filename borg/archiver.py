@@ -30,7 +30,6 @@ from .upgrader import AtticRepositoryUpgrader, BorgRepositoryUpgrader
 from .repository import Repository
 from .cache import Cache
 from .key import key_creator, RepoKey, PassphraseKey
-from .keymanager import KeyManager
 from .archive import backup_io, BackupOSError, Archive, ArchiveChecker, CHUNKER_PARAMS, is_special
 from .remote import RepositoryServer, RemoteRepository, cache_if_remote
 
@@ -70,17 +69,17 @@ def with_repository(fake=False, create=False, lock=True, exclusive=False, manife
                 return method(self, args, repository=None, **kwargs)
             elif location.proto == 'ssh':
                 repository = RemoteRepository(location, create=create, exclusive=argument(args, exclusive),
-                                              lock_wait=self.lock_wait, lock=lock, append_only=append_only, args=args)
+                                              lock_wait=args.lock_wait, lock=lock, append_only=append_only, args=args)
             else:
                 repository = Repository(location.path, create=create, exclusive=argument(args, exclusive),
-                                        lock_wait=self.lock_wait, lock=lock,
+                                        lock_wait=args.lock_wait, lock=lock,
                                         append_only=append_only)
             with repository:
                 if manifest or cache:
                     kwargs['manifest'], kwargs['key'] = Manifest.load(repository)
                 if cache:
                     with Cache(repository, kwargs['key'], kwargs['manifest'],
-                               do_files=getattr(args, 'cache_files', False), lock_wait=self.lock_wait) as cache_:
+                               do_files=getattr(args, 'cache_files', False), lock_wait=args.lock_wait) as cache_:
                         return method(self, args, repository=repository, cache=cache_, **kwargs)
                 else:
                     return method(self, args, repository=repository, **kwargs)
@@ -99,9 +98,8 @@ def with_archive(method):
 
 class Archiver:
 
-    def __init__(self, lock_wait=None):
+    def __init__(self):
         self.exit_code = EXIT_SUCCESS
-        self.lock_wait = lock_wait
 
     def print_error(self, msg, *args):
         msg = args and msg % args or msg
@@ -158,36 +156,6 @@ class Archiver:
     def do_change_passphrase(self, args, repository, manifest, key):
         """Change repository key file passphrase"""
         key.change_passphrase()
-        return EXIT_SUCCESS
-
-    @with_repository(lock=False, exclusive=False, manifest=False, cache=False)
-    def do_key_export(self, args, repository):
-        """Export the repository key for backup"""
-        manager = KeyManager(repository)
-        manager.load_keyblob()
-        if args.paper:
-            manager.export_paperkey(args.path)
-        else:
-            if not args.path:
-                self.print_error("output file to export key to expected")
-                return EXIT_ERROR
-            manager.export(args.path)
-        return EXIT_SUCCESS
-
-    @with_repository(lock=False, exclusive=False, manifest=False, cache=False)
-    def do_key_import(self, args, repository):
-        """Export the repository key for backup"""
-        manager = KeyManager(repository)
-        if args.paper:
-            if args.path:
-                self.print_error("with --paper import from file is not supported")
-                return EXIT_ERROR
-            manager.import_paperkey(args)
-        else:
-            if not args.path:
-                self.print_error("input file to import key from expected")
-                return EXIT_ERROR
-            manager.import_keyfile(args)
         return EXIT_SUCCESS
 
     @with_repository(manifest=False)
@@ -272,7 +240,7 @@ class Archiver:
         t0 = datetime.utcnow()
         if not dry_run:
             key.compressor = Compressor(**args.compression)
-            with Cache(repository, key, manifest, do_files=args.cache_files, lock_wait=self.lock_wait) as cache:
+            with Cache(repository, key, manifest, do_files=args.cache_files, lock_wait=args.lock_wait) as cache:
                 archive = Archive(repository, key, manifest, args.location.archive, cache=cache,
                                   create=True, checkpoint_interval=args.checkpoint_interval,
                                   numeric_owner=args.numeric_owner, progress=args.progress,
@@ -470,7 +438,7 @@ class Archiver:
         """Delete an existing repository or archive"""
         if args.location.archive:
             manifest, key = Manifest.load(repository)
-            with Cache(repository, key, manifest, lock_wait=self.lock_wait) as cache:
+            with Cache(repository, key, manifest, lock_wait=args.lock_wait) as cache:
                 archive = Archive(repository, key, manifest, args.location.archive, cache=cache)
                 stats = Statistics()
                 archive.delete(stats, progress=args.progress, forced=args.forced)
@@ -671,7 +639,7 @@ class Archiver:
         keep.sort(key=attrgetter('ts'), reverse=True)
         to_delete = [a for a in archives if a not in keep]
         stats = Statistics()
-        with Cache(repository, key, manifest, do_files=args.cache_files, lock_wait=self.lock_wait) as cache:
+        with Cache(repository, key, manifest, do_files=args.cache_files, lock_wait=args.lock_wait) as cache:
             for archive in keep:
                 if args.output_list:
                     logger.info('Keeping archive: %s' % format_archive(archive))
@@ -965,6 +933,8 @@ class Archiver:
         return args
 
     def build_parser(self, args=None, prog=None):
+        from .keymanager import KeyParser
+
         common_parser = argparse.ArgumentParser(add_help=False, prog=prog)
         common_parser.add_argument('--critical', dest='log_level',
                                    action='store_const', const='critical', default='warning',
@@ -1107,33 +1077,14 @@ class Archiver:
         subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
                                type=location_validator(archive=False))
 
-        subparser = subparsers.add_parser('key-export', parents=[common_parser],
-                                          description=self.do_key_export.__doc__,
+        subparser = subparsers.add_parser('key',
+                                          description="Manage a keyfile or repokey of an repository",
                                           epilog="",
                                           formatter_class=argparse.RawDescriptionHelpFormatter,
-                                          help='export repository key for backup')
-        subparser.set_defaults(func=self.do_key_export)
-        subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
-                               type=location_validator(archive=False))
-        subparser.add_argument('path', metavar='PATH', nargs='?', type=str,
-                               help='where to store the backup')
-        subparser.add_argument('--paper', dest='paper', action='store_true',
-                               default=False,
-                               help='Create an export suitable for printing and later type-in')
+                                          help='repository key management')
+        key_parsers = subparser.add_subparsers(title='required arguments', metavar='<command>')
 
-        subparser = subparsers.add_parser('key-import', parents=[common_parser],
-                                          description=self.do_key_import.__doc__,
-                                          epilog="",
-                                          formatter_class=argparse.RawDescriptionHelpFormatter,
-                                          help='import repository key from backup')
-        subparser.set_defaults(func=self.do_key_import)
-        subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
-                               type=location_validator(archive=False))
-        subparser.add_argument('path', metavar='PATH', nargs='?', type=str,
-                               help='path to the backup')
-        subparser.add_argument('--paper', dest='paper', action='store_true',
-                               default=False,
-                               help='interactively import from a backup done with --paper')
+        KeyParser().build_subparser(key_parsers, common_parser)
 
         migrate_to_repokey_epilog = textwrap.dedent("""
         This command migrates a repository from passphrase mode (not supported any
@@ -1686,7 +1637,6 @@ class Archiver:
 
     def run(self, args):
         os.umask(args.umask)  # early, before opening files
-        self.lock_wait = args.lock_wait
         setup_logging(level=args.log_level, is_serve=args.func == self.do_serve)  # do not use loggers before this!
         check_extension_modules()
         if is_slow_msgpack():
