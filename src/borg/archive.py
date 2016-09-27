@@ -232,6 +232,48 @@ class CacheChunkBuffer(ChunkBuffer):
         return id_
 
 
+class DryRunArchive:
+
+    def __init__(self):
+        self.hard_links = {}
+        self.stats = Statistics()
+
+    def __str__(self):
+        return '''\
+Number of files: {0}
+Sum of file sizes: {1}'''.format(
+            self.stats.nfiles, format_file_size(self.stats.osize))
+
+    def process_dir(self, path, st):
+        return 'd'  # directory
+
+    def process_fifo(self, path, st):
+        return 'f'  # fifo
+
+    def process_dev(self, path, st):
+        if stat.S_ISCHR(st.st_mode):
+            return 'c'  # char device
+        elif stat.S_ISBLK(st.st_mode):
+            return 'b'  # block device
+
+    def process_symlink(self, path, st):
+        return 's'  # symlink
+
+    def process_file(self, path, st, cache, ignore_inode=False):
+        status = '?'
+        safe_path = make_path_safe(path)
+        # Is it a hard link?
+        if st.st_nlink > 1:
+            source = self.hard_links.get((st.st_ino, st.st_dev))
+            if source is not None:
+                status = 'h'  # regular file, hardlink (to already seen inodes)
+                return status
+            else:
+                self.hard_links[st.st_ino, st.st_dev] = safe_path
+        self.stats.update(st.st_size, st.st_size, st.st_size)
+        self.stats.nfiles += 1
+        return status
+
 class Archive:
 
     class DoesNotExist(Error):

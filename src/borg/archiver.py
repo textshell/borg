@@ -22,7 +22,7 @@ logger = create_logger()
 
 from . import __version__
 from . import helpers
-from .archive import Archive, ArchiveChecker, ArchiveRecreater, Statistics, is_special
+from .archive import Archive, ArchiveChecker, ArchiveRecreater, Statistics, DryRunArchive, is_special
 from .archive import BackupOSError, CHUNKER_PARAMS
 from .cache import Cache
 from .constants import *  # NOQA
@@ -332,6 +332,11 @@ class Archiver:
                               str(archive.stats),
                               str(cache),
                               DASHES, logger=logging.getLogger('borg.output.stats'))
+            else:
+                if args.stats:
+                    log_multi(DASHES,
+                              str(archive),
+                              DASHES, logger=logging.getLogger('borg.output.stats'))
 
         self.output_filter = args.output_filter
         self.output_list = args.output_list
@@ -347,7 +352,7 @@ class Archiver:
                                   compression=args.compression, compression_files=args.compression_files)
                 create_inner(archive, cache)
         else:
-            create_inner(None, None)
+            create_inner(DryRunArchive(), None)
         return self.exit_code
 
     def _process(self, archive, cache, matcher, exclude_caches, exclude_if_present,
@@ -378,25 +383,23 @@ class Archiver:
             self.print_warning('%s: %s', path, e)
             return
         if stat.S_ISREG(st.st_mode):
-            if not dry_run:
-                try:
-                    status = archive.process_file(path, st, cache, self.ignore_inode)
-                except BackupOSError as e:
-                    status = 'E'
-                    self.print_warning('%s: %s', path, e)
+            try:
+                status = archive.process_file(path, st, cache, self.ignore_inode)
+            except BackupOSError as e:
+                status = 'E'
+                self.print_warning('%s: %s', path, e)
         elif stat.S_ISDIR(st.st_mode):
             if recurse:
                 tag_paths = dir_is_tagged(path, exclude_caches, exclude_if_present)
                 if tag_paths:
-                    if keep_tag_files and not dry_run:
+                    if keep_tag_files:
                         archive.process_dir(path, st)
                         for tag_path in tag_paths:
                             self._process(archive, cache, matcher, exclude_caches, exclude_if_present,
                                           keep_tag_files, skip_inodes, tag_path, restrict_dev,
                                           read_special=read_special, dry_run=dry_run)
                     return
-            if not dry_run:
-                status = archive.process_dir(path, st)
+            status = archive.process_dir(path, st)
             if recurse:
                 try:
                     entries = helpers.scandir_inorder(path)
@@ -410,32 +413,29 @@ class Archiver:
                                       keep_tag_files, skip_inodes, normpath, restrict_dev,
                                       read_special=read_special, dry_run=dry_run)
         elif stat.S_ISLNK(st.st_mode):
-            if not dry_run:
-                if not read_special:
+            if not read_special:
+                status = archive.process_symlink(path, st)
+            else:
+                try:
+                    st_target = os.stat(path)
+                except OSError:
+                    special = False
+                else:
+                    special = is_special(st_target.st_mode)
+                if special:
+                    status = archive.process_file(path, st_target, cache)
+                else:
                     status = archive.process_symlink(path, st)
-                else:
-                    try:
-                        st_target = os.stat(path)
-                    except OSError:
-                        special = False
-                    else:
-                        special = is_special(st_target.st_mode)
-                    if special:
-                        status = archive.process_file(path, st_target, cache)
-                    else:
-                        status = archive.process_symlink(path, st)
         elif stat.S_ISFIFO(st.st_mode):
-            if not dry_run:
-                if not read_special:
-                    status = archive.process_fifo(path, st)
-                else:
-                    status = archive.process_file(path, st, cache)
+            if not read_special:
+                status = archive.process_fifo(path, st)
+            else:
+                status = archive.process_file(path, st, cache)
         elif stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode):
-            if not dry_run:
-                if not read_special:
-                    status = archive.process_dev(path, st)
-                else:
-                    status = archive.process_file(path, st, cache)
+            if not read_special:
+                status = archive.process_dev(path, st)
+            else:
+                status = archive.process_file(path, st, cache)
         elif stat.S_ISSOCK(st.st_mode):
             # Ignore unix sockets
             return
