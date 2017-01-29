@@ -1262,9 +1262,8 @@ class Archiver:
                 elif isinstance(value, bytes):
                     value = decode_bytes(value)
                 if isinstance(key, bytes):
-                    res[key.decode()] = value
-                else:
-                    res[key] = value
+                    key = key.decode()
+                res[key] = value
             return res
 
         return decode(d)
@@ -1295,8 +1294,11 @@ class Archiver:
 
         archive_meta['_items'] = items
 
-        with open(args.path, 'w') as fd:
-            json.dump(archive_meta, fd, indent=4)
+        if args.path == '-':
+            json.dump(archive_meta, sys.stdout, indent=4)
+        else:
+            with open(args.path, 'w') as fd:
+                json.dump(archive_meta, fd, indent=4)
         return EXIT_SUCCESS
 
     @with_repository()
@@ -1307,8 +1309,11 @@ class Archiver:
 
         meta = self.debug_json(msgpack.fallback.unpackb(data, object_hook=StableDict, unicode_errors='surrogateescape'))
 
-        with open(args.path, 'w') as fd:
-            json.dump(meta, fd, indent=4)
+        if args.path == '-':
+            json.dump(meta, sys.stdout, indent=4)
+        else:
+            with open(args.path, 'w') as fd:
+                json.dump(meta, fd, indent=4)
         return EXIT_SUCCESS
 
     @with_repository()
