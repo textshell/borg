@@ -42,6 +42,7 @@ from .helpers import prune_within, prune_split
 from .helpers import to_localtime, timestamp
 from .helpers import get_cache_dir
 from .helpers import Manifest
+from .helpers import StableDict
 from .helpers import update_excludes, check_extension_modules
 from .helpers import dir_is_tagged, is_slow_msgpack, yes, sysinfo
 from .helpers import log_multi
@@ -1280,10 +1281,10 @@ class Archiver:
         archive_meta['_name'] = args.location.archive
 
         _, data = key.decrypt(archive_meta_orig[b'id'], repository.get(archive_meta_orig[b'id']))
-        archive_org_dict = msgpack.unpackb(data, object_hook=collections.OrderedDict, unicode_errors='surrogateescape')
+        archive_org_dict = msgpack.unpackb(data, object_hook=StableDict, unicode_errors='surrogateescape')
         archive_meta['_meta'] = self.debug_json(archive_org_dict)
 
-        unpacker = msgpack.Unpacker(use_list=False)
+        unpacker = msgpack.Unpacker(use_list=False, object_hook=StableDict)
         items = []
         for item_id in archive_org_dict[b'items']:
             _, data = key.decrypt(item_id, repository.get(item_id))
@@ -1304,7 +1305,7 @@ class Archiver:
 
         _, data = key.decrypt(None, repository.get(manifest.MANIFEST_ID))
 
-        meta = self.debug_json(msgpack.fallback.unpackb(data, object_hook=collections.OrderedDict, unicode_errors='surrogateescape'))
+        meta = self.debug_json(msgpack.fallback.unpackb(data, object_hook=StableDict, unicode_errors='surrogateescape'))
 
         with open(args.path, 'w') as fd:
             json.dump(meta, fd, indent=4)
