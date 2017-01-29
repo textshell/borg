@@ -1276,29 +1276,49 @@ class Archiver:
             archive_meta_orig = manifest.archives.get_raw_dict()[safe_encode(args.location.archive)]
         except KeyError:
             raise Archive.DoesNotExist(args.location.archive)
-        archive_meta = self.debug_json(archive_meta_orig)
-        archive_meta['_name'] = args.location.archive
 
-        _, data = key.decrypt(archive_meta_orig[b'id'], repository.get(archive_meta_orig[b'id']))
-        archive_org_dict = msgpack.unpackb(data, object_hook=StableDict, unicode_errors='surrogateescape')
-        archive_meta['_meta'] = self.debug_json(archive_org_dict)
+        indent = 4
 
-        unpacker = msgpack.Unpacker(use_list=False, object_hook=StableDict)
-        items = []
-        for item_id in archive_org_dict[b'items']:
-            _, data = key.decrypt(item_id, repository.get(item_id))
-            unpacker.feed(data)
-            for item in unpacker:
-                item = self.debug_json(item)
-                items.append(item)
+        def do_indent(d):
+            return textwrap.indent(json.dumps(d, indent=indent), prefix=' ' * indent)
 
-        archive_meta['_items'] = items
+        def output(fd):
+            # this outputs megabytes of data for a modest sized archive, so some manual streaming json output
+            fd.write('{\n')
+            fd.write('    "_name": ' + json.dumps(args.location.archive) + ",\n")
+            fd.write('    "_manifest_entry":\n')
+            fd.write(do_indent(self.debug_json(archive_meta_orig)))
+            fd.write(',\n')
+
+            _, data = key.decrypt(archive_meta_orig[b'id'], repository.get(archive_meta_orig[b'id']))
+            archive_org_dict = msgpack.unpackb(data, object_hook=StableDict, unicode_errors='surrogateescape')
+
+            fd.write('    "_meta":\n')
+            fd.write(do_indent(self.debug_json(archive_org_dict)))
+            fd.write(',\n')
+            fd.write('    "_items": [\n')
+
+            unpacker = msgpack.Unpacker(use_list=False, object_hook=StableDict)
+            first = True
+            for item_id in archive_org_dict[b'items']:
+                _, data = key.decrypt(item_id, repository.get(item_id))
+                unpacker.feed(data)
+                for item in unpacker:
+                    item = self.debug_json(item)
+                    if first:
+                        first = False
+                    else:
+                        fd.write(',\n')
+                    fd.write(do_indent(item))
+
+            fd.write('\n')
+            fd.write('    ]\n}\n')
 
         if args.path == '-':
-            json.dump(archive_meta, sys.stdout, indent=4)
+            output(sys.stdout)
         else:
             with open(args.path, 'w') as fd:
-                json.dump(archive_meta, fd, indent=4)
+                output(fd)
         return EXIT_SUCCESS
 
     @with_repository()
