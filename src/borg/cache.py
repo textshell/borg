@@ -588,7 +588,7 @@ Chunk index:    {0.total_unique_chunks:20d} {0.total_chunks:20d}"""
             except FileNotFoundError:
                 pass
 
-        def fetch_and_build_idx(archive_id, decrypted_repository, chunk_idx):
+        def fetch_and_build_idx(archive_id, decrypted_repository, chunk_idx, precise):
             nonlocal processed_item_metadata_bytes
             nonlocal processed_item_metadata_chunks
             csize, data = decrypted_repository.get(archive_id)
@@ -601,7 +601,16 @@ Chunk index:    {0.total_unique_chunks:20d} {0.total_chunks:20d}"""
                 chunk_idx.add(item_id, 1, len(data), csize)
                 processed_item_metadata_bytes += len(data)
                 processed_item_metadata_chunks += 1
-                sync.feed(data)
+                if precise:
+                    sync.feed(data)
+                else:
+                    # in inprecise mode unreadable archives are simply ignored. This is ok, because the cache is only
+                    # is allowed to have false negatives in imprecise mode.
+                    try:
+                        sync.feed(data)
+                    except ValueError:
+                        logger.debug('Cache sync: skipping unreadable archive in imprecise mode.')
+                        break
             if self.do_cache:
                 write_archive_index(archive_id, chunk_idx)
 
@@ -673,6 +682,7 @@ Chunk index:    {0.total_unique_chunks:20d} {0.total_chunks:20d}"""
             # Explicitly set the initial hash table capacity to avoid performance issues
             # due to hash table "resonance".
             master_index_capacity = int(len(self.repository) / ChunkIndex.MAX_LOAD_FACTOR)
+            precise = (self.cache_config.ignored_features == set())
             if archive_ids:
                 chunk_idx = None if not self.do_cache else ChunkIndex(master_index_capacity)
                 pi = ProgressIndicatorPercent(total=len(archive_ids), step=0.1,
@@ -691,13 +701,13 @@ Chunk index:    {0.total_unique_chunks:20d} {0.total_chunks:20d}"""
                             # above can remove *archive_id* from *cached_ids*.
                             logger.info('Fetching and building archive index for %s ...', archive_name)
                             archive_chunk_idx = ChunkIndex()
-                            fetch_and_build_idx(archive_id, decrypted_repository, archive_chunk_idx)
+                            fetch_and_build_idx(archive_id, decrypted_repository, archive_chunk_idx, precise)
                         logger.info("Merging into master chunks index ...")
                         chunk_idx.merge(archive_chunk_idx)
                     else:
                         chunk_idx = chunk_idx or ChunkIndex(master_index_capacity)
                         logger.info('Fetching archive index for %s ...', archive_name)
-                        fetch_and_build_idx(archive_id, decrypted_repository, chunk_idx)
+                        fetch_and_build_idx(archive_id, decrypted_repository, chunk_idx, precise)
                 pi.finish()
                 logger.debug('Cache sync: processed %s bytes (%d chunks) of metadata',
                              format_file_size(processed_item_metadata_bytes), processed_item_metadata_chunks)
